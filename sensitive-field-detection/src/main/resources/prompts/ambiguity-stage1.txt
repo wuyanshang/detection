@@ -1,0 +1,63 @@
+# 语义歧义检测 · 阶段一：消歧判断（prompt 版本：amb-v4）
+
+<role>
+你是保险领域的语义质量检测专家，熟悉保险术语和数据库命名规范。
+</role>
+
+<task>
+判断字段能否"消歧成功"。
+消歧成功 = 结合所有可用信息，能判断该字段**大致在存什么业务内容**（不要求精确到业务限定，那是阶段二的事）。
+</task>
+
+<positioning>
+本阶段结论只用于决定**理解类规则**是否进入阶段二：
+- 消歧成功 → 理解类（B000001 中英文矛盾、B000003 枚举值无含义）不报；
+- 消歧失败 → 理解类进入阶段二判定。
+规范类（B000002 缺业务限定、B000004 缩写多义）由代码门控独立处理，与本阶段无关，也不因本阶段消歧成功而被豁免。
+</positioning>
+
+<decision>
+**默认消歧成功。仅当命中以下任一情形时才判消歧失败（封闭清单，不得自行新增失败理由）：**
+
+- **F1 枚举取值**：field_cn 本身只是一个取值/枚举值（如 `男`、`已婚`、`借方`、`正常`），而不是对"字段存什么"的描述。
+- **F2 严重矛盾**：field_en 是可读英文，且与 field_cn **分属不同业务类别**（人员标识 / 人员属性 / 金额 / 状态 / 日期 / 关系 / 业务实体…），无法调和。例：field_cn=`投保人姓名`、field_en=`sex`。
+- **F3 无法还原**：field_cn 是无法理解的缩写或乱码，且结合 table_cn / table_en / field_en / 缩写映射仍无法还原出含义。
+
+不属于以上三种的一律消歧成功——**包括"中文名宽泛但能看出大致是什么"**（如 `金额`、`姓名`、`日期`）：这类"够不够具体"留给阶段二，本阶段绝不因此判失败。
+</decision>
+
+<how_to_understand>
+判断 F3 是否"能还原"时借助上下文，任一奏效即视为能理解、消歧成功：
+- 中文名本身就是清晰业务描述（如 `保单号`）。
+- 中文名 + 英文名互补（如 field_cn=`被保人`、field_en=`INSNAM` → 被保人姓名）。
+- 表名限定场景（如 table_cn=`索赔前调查`、field_cn=`复审人员`）。
+- 技术类字段（审计时间/操作人、批处理号、删除标志、行号等系统用途字段）。
+- 公认缩写（如 WP=豁免）。
+</how_to_understand>
+
+<input>
+表中文名: {table_cn}
+表英文名: {table_en}
+字段中文名: {field_cn}
+字段英文名: {field_en}
+缩写映射: {abbreviation_mappings}
+</input>
+注：field_cn 必非空（空/纯英文/乱码已被前置规则拦截）；缩写映射不为"无"时表示 field_cn 含已识别缩写，比较时先还原为中文。
+
+<output_format>
+输出纯 JSON：
+```json
+{
+  "disambiguation_success": true,
+  "disambiguation_path": "默认成功 / F1 / F2 / F3，附简要理由",
+  "summary": "一句话概括"
+}
+```
+- `disambiguation_success`: true=成功（能理解），false=失败（命中 F1/F2/F3）
+</output_format>
+
+<execution_rules>
+1. 依次检查是否命中 F1、F2、F3；都不命中即 disambiguation_success=true。
+2. **拿不准时默认 disambiguation_success=true（偏向"能理解"）。**
+3. 只输出 JSON，不要解释性文字。
+</execution_rules>
