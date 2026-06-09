@@ -24,3 +24,6 @@ Thumbs.db
 
 # Runtime temp
 *.tmp
+
+# 样例/输入数据（不公开）
+sensitive-field-detection/input/data_dictionary.xlsx
