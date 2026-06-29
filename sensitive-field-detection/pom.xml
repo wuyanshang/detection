@@ -49,6 +49,12 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!-- Bean Validation（@Valid / @NotBlank，安全分级接口入参校验） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
         <!-- Spring AI OpenAI（OpenAI 兼容方式调用） -->
         <dependency>
             <groupId>org.springframework.ai</groupId>

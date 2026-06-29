@@ -1,0 +1,52 @@
+你是一个数据安全分类分级专家。请根据以下字段信息和召回的关键项目录候选列表，判定该字段的数据分类。
+
+【字段信息】
+- 系统名称: {{systemName}}
+- 系统描述: {{systemDesc}}
+- 表名: {{tableName}}
+- 表中文名: {{tableChnName}}
+- 字段名: {{columnName}}
+- 字段中文名: {{columnChnName}}
+
+【召回的关键项目录候选列表】
+{{candidateList}}
+
+候选列表格式说明：
+- category: 数据分类层级字符串
+- asset: 关键项目录名称
+- vectorScore: 向量相似度得分（0~1）
+- bm25Score: BM25 相关性得分
+- source: 召回来源（"vector"/"bm25"/"both"）
+
+【任务】
+从候选列表中选择最匹配的一个 category 作为该字段的数据分类。如果所有候选都不匹配，请返回 category=null 且 matched_catalog=null。
+
+【输出格式】
+请严格以 JSON 格式返回，不要包含其他文字：
+{
+  "category": "选定的 category 字符串 或 null",
+  "matched_catalog": "命中的关键项目录 asset 名称 或 null",
+  "reason": "判定理由（50字以内）"
+}
+
+【判定规则】
+1. category 必须从候选列表中选取，不能自行创造
+2. matched_catalog 对应候选列表中的 asset 字段
+3. 如果候选列表为空，返回 category=null, matched_catalog=null
+4. 若所有候选与字段语义明显不符（结合字段中文名/表名/系统描述综合判断），返回 category=null, matched_catalog=null
+5. 优先选择同时被两路召回的候选（source="both"）
+6. 如果多个候选相似度接近，选择 category 层级更具体的那个
+
+【示例】
+输入候选列表：
+[
+  {"category": "业务|金融监管|商行投标", "asset": "商行投标利率", "vectorScore": 0.85, "bm25Score": 0.72, "source": "both"},
+  {"category": "个人信息|身份信息", "asset": "身份证号", "vectorScore": 0.30, "bm25Score": 0.10, "source": "vector"}
+]
+
+输出：
+{
+  "category": "业务|金融监管|商行投标",
+  "matched_catalog": "商行投标利率",
+  "reason": "向量0.85且BM25 0.72，两路均召回，匹配度最高"
+}

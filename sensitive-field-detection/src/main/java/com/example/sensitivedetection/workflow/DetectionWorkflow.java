@@ -22,9 +22,9 @@ import java.util.stream.Collectors;
 @Component
 public class DetectionWorkflow {
 
-    private final CompiledGraph<OverAllState> detectionGraph;
+    private final CompiledGraph detectionGraph;
 
-    public DetectionWorkflow(CompiledGraph<OverAllState> detectionGraph) {
+    public DetectionWorkflow(CompiledGraph detectionGraph) {
         this.detectionGraph = detectionGraph;
     }
 

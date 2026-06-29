@@ -1,9 +1,10 @@
 package com.example.sensitivedetection.workflow;
 
 import com.alibaba.cloud.ai.graph.CompiledGraph;
-import com.alibaba.cloud.ai.graph.GraphStateException;
-import com.alibaba.cloud.ai.graph.OverAllState;
+import com.alibaba.cloud.ai.graph.KeyStrategy;
+import com.alibaba.cloud.ai.graph.KeyStrategyFactory;
 import com.alibaba.cloud.ai.graph.StateGraph;
+import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import com.example.sensitivedetection.workflow.node.KeywordMatchNode;
 import com.example.sensitivedetection.workflow.node.LlmDetectNode;
@@ -24,7 +25,7 @@ import static com.alibaba.cloud.ai.graph.action.AsyncNodeAction.node_async;
 public class DetectionGraphConfig {
 
     @Bean
-    public CompiledGraph<OverAllState> detectionGraph(
+    public CompiledGraph detectionGraph(
             TableCheckNode tableCheckNode,
             QualityCheckNode qualityCheckNode,
             KeywordMatchNode keywordMatchNode,
@@ -32,14 +33,14 @@ public class DetectionGraphConfig {
             SummarizeNode summarizeNode) throws GraphStateException {
 
         // 定义状态 schema，所有 key 使用替换策略
-        Map<String, Object> stateSchema = Map.of(
+        KeyStrategyFactory keyStrategyFactory = () -> Map.<String, KeyStrategy>of(
                 "results", new ReplaceStrategy(),
                 "tableResults", new ReplaceStrategy(),
                 "batchNo", new ReplaceStrategy(),
                 "hasUndecided", new ReplaceStrategy()
         );
 
-        StateGraph<OverAllState> graph = new StateGraph<>(stateSchema, OverAllState::new)
+        StateGraph graph = new StateGraph(keyStrategyFactory)
                 // 节点
                 .addNode("tableCheck", node_async(tableCheckNode))
                 .addNode("qualityCheck", node_async(qualityCheckNode))

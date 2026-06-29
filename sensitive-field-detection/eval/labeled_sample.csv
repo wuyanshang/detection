@@ -1,0 +1,4 @@
+systemName,systemDesc,tableName,tableChnName,columnName,columnChnName,expected_category
+国库管理系统,国库业务核算与管理,TB_TREASURY_BID,国库业务表,TBD_INT_RT,投标利率,业务|金融监管和服务|国库业务信息|商行投标利率详情
+保单管理系统,寿险保单核心系统,T_POLICY,保单主表,DEDUCT_AMT,自负金额,业务|保险业务|理赔信息|免赔额
+客户管理系统,客户主数据,T_CUSTOMER,客户信息表,ID_NO,证件号码,个人信息|身份标识信息|身份证件号码

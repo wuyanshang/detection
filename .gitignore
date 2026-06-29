@@ -25,5 +25,9 @@ Thumbs.db
 # Runtime temp
 *.tmp
 
+# Python
+__pycache__/
+*.pyc
+
 # 样例/输入数据（不公开）
 sensitive-field-detection/input/data_dictionary.xlsx

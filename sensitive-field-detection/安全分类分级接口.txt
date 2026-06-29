@@ -1,0 +1,821 @@
+# 数据安全分类分级接口设计方案
+
+## 1. 概述
+
+### 1.1 背景
+在现有数据质量检查系统的基础上，新增数据安全分类分级功能，用于对数据字典中的表和字段进行自动化安全等级判定和数据分类。
+
+### 1.2 目标
+- 实现基于AI的数据安全分类分级自动化判定
+- 支持多路召回（向量语义匹配 + BM25关键词匹配）提高召回率
+- 提供免检机制和同义词替换预处理，提升准确率
+- 支持与现有质检流程的无缝集成
+
+### 1.3 技术栈
+- **工作流引擎**: Spring AI Alibaba Graph
+- **向量数据库**: Elasticsearch (索引: `safe_all_topic`)
+- **Embedding模型**: text-embedding-v4 (1024维)
+- **LLM模型**: kimi-k2.6 (可配置)
+- **数据库**: MySQL (存储规则库和结果缓存)
+
+---
+
+## 2. 系统架构
+
+### 2.1 整体流程图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    安全分类分级AI工作流                        │
+└─────────────────────────────────────────────────────────────┘
+
+阶段1: 数据输入
+  └─→ 单条字段信息 (SystemName, SystemDesc, tableName, tableChnName, columnName, columnChnName)
+
+阶段2: 预处理
+  ├─→ [免检判定] → 命中？→ 是 → 返回缓存结果
+  │       ↓ 否
+  └─→ [同义词替换] → 替换 columnChnName (如"自负金额"→"免赔额")
+
+阶段3: 安全等级判定
+  ├─→ [多路召回] (并行执行)
+  │   ├─→ 向量检索: columnChnName embedding → ES asset_embedding (Top 10, min_score=0.65)
+  │   └─→ BM25检索: columnChnName → ES asset (Top 10)
+  │
+  ├─→ [合并去重] → 按 category 去重，得到候选列表
+  │
+  ├─→ [AI匹配] → LLM判定最终 category
+  │
+  └─→ [结果保存] → 存入 dq_security_classification_result 表
+
+阶段4: 结果校正 (后续实现，方式待定)
+  ─→ 对未匹配/低质量结果的校正机制 → 更新知识库
+```
+
+### 2.2 工作流节点设计
+
+| 节点名 | 职责 | 输入 | 输出 |
+|--------|------|------|------|
+| ExemptionCheckNode | 免检判定 | 字段信息 | isExempt=true/false, 缓存结果(如有) |
+| SynonymReplaceNode | 同义词替换 | columnChnName | 替换后的 columnChnName |
+| VectorSearchNode | ES向量检索 | columnChnName (embedding) | Top 10 向量检索结果 |
+| Bm25SearchNode | ES BM25检索 | columnChnName | Top 10 BM25检索结果 |
+| MergeDedupNode | 合并去重 | 两路检索结果 | 去重后的 category 候选列表 |
+| AiMatchNode | AI判定 | 字段信息 + 候选列表 | 最终 category, matched_catalog, reason |
+| ResultSaveNode | 保存结果 | 分级结果 | 写入数据库 |
+
+---
+
+## 3. API接口设计
+
+### 3.1 接口定义
+
+**路径**: `POST /api/security/classify`
+
+**请求体**:
+```json
+{
+  "systemName": "目标系统名",
+  "systemDesc": "目标系统描述",
+  "tableName": "表英文名",
+  "tableChnName": "表中文名",
+  "columnName": "字段英文名",
+  "columnChnName": "字段中文名",
+  "forceRefresh": false
+}
+```
+
+**响应体**:
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "systemName": "目标系统名",
+    "tableName": "表英文名",
+    "columnName": "字段英文名",
+    "category": "业务|金融监管和服务|国库业务信息|商行投标利率详情",
+    "matchedCatalog": "商行投标利率详情",
+    "reason": "AI判定理由",
+    "vectorResults": [...],  // 可选，调试用
+    "bm25Results": [...]     // 可选，调试用
+  }
+}
+```
+
+**说明**:
+- `category`: 最终判定的数据分类，来自关键项目录的 category 字段
+- `matchedCatalog`: 命中的关键项目录名称（对应 ES 的 asset 字段），null 表示未匹配到目录
+- `reason`: AI判定的理由
+
+> 说明：免检（缓存命中）是内部机制，对调用方透明，不在响应体中体现。
+
+> **命名约定**：内部 LLM 交互与 DB 字段使用下划线风格（如 `matched_catalog`），对外 API（DTO/VO）使用驼峰风格（如 `matchedCatalog`），由 Controller 层的 VO 转换统一处理。
+
+### 3.2 Controller类设计
+
+```java
+@RestController
+@RequestMapping("/api/security")
+public class SecurityClassificationController {
+    
+    @PostMapping("/classify")
+    public ApiResponse<SecurityClassificationOutputVO> classify(
+        @Validated @RequestBody SecurityClassificationInputDTO request) {
+        // 调用工作流执行（单条）
+    }
+
+    @PostMapping("/classify/batch")
+    public ApiResponse<List<SecurityClassificationOutputVO>> classifyBatch(
+        @Validated @RequestBody List<SecurityClassificationInputDTO> requests) {
+        // 批量执行：内部并发调度，受 llm-concurrency-limit 限流
+    }
+}
+```
+
+### 3.3 批量接口设计
+
+**动机**: 数据字典动辄上万字段，逐个调用单条接口性能不可接受。`application.yml` 中的 `llm-concurrency-limit`、`latch-timeout-minutes` 等配置正是为批量并发服务。
+
+**路径**: `POST /api/security/classify/batch`
+
+**设计要点**:
+- **请求体**: `SecurityClassificationInputDTO` 数组（建议单批上限可配置，如 ≤ 500 条，超出分片）。
+- **并发执行**: 内部用线程池 + `CountDownLatch`/`CompletableFuture` 并行跑工作流，由 `llm-concurrency-limit` 限制 LLM 并发数，`latch-timeout-minutes` 控制整批超时。
+- **免检前置**: 先批量查缓存，命中且有效的直接返回，仅对未命中的走完整流程，显著降本。
+- **embedding 批量化**: 未命中字段的 embedding 批量生成（见 6.3）。
+- **部分失败**: 单条失败不影响整批，失败项返回 `category=null` 与错误原因，整体仍返回 200。
+- **异步模式（可选）**: 超大批量建议改为异步任务——提交返回 `taskId`，通过 `GET /api/security/classify/task/{taskId}` 轮询进度与结果，避免 HTTP 长时间阻塞。
+
+---
+
+## 4. 数据库设计
+
+### 4.1 安全分级结果表 (`dq_security_classification_result`)
+
+**用途**: 
+- 存储分级结果（类似质检的缓存表）
+- 免检判定依据：如果表中已有该字段的记录，直接返回缓存结果
+
+```sql
+CREATE TABLE dq_security_classification_result (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+    cache_key VARCHAR(500) NOT NULL UNIQUE COMMENT '缓存key：systemName|tableName|columnName',
+    system_name VARCHAR(100) NOT NULL COMMENT '系统名',
+    system_desc VARCHAR(500) COMMENT '系统描述',
+    table_name VARCHAR(100) NOT NULL COMMENT '表英文名',
+    table_chn_name VARCHAR(200) COMMENT '表中文名',
+    column_name VARCHAR(100) NOT NULL COMMENT '字段英文名',
+    column_chn_name VARCHAR(200) COMMENT '字段中文名',
+    
+    -- 分级结果
+    category VARCHAR(500) COMMENT '数据分类（来自关键项目录）',
+    matched_catalog VARCHAR(200) COMMENT '命中的关键项目录名称（asset字段）',
+    is_exempt TINYINT DEFAULT 0 COMMENT '是否免检',
+
+    -- 缓存版本控制
+    rule_version VARCHAR(50) COMMENT 'ES知识库/规则版本，知识库更新后用于判定缓存是否过期',
+    expire_at DATETIME COMMENT '缓存过期时间，NULL表示永久有效',
+
+    -- 召回信息（用于调试和审计）
+    vector_search_results JSON COMMENT '向量检索结果列表',
+    bm25_search_results JSON COMMENT 'BM25检索结果列表',
+    ai_reason TEXT COMMENT 'AI判定理由',
+    
+    -- 审计字段
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    INDEX idx_cache_key (cache_key),
+    INDEX idx_system (system_name),
+    INDEX idx_category (category(255))
+) COMMENT '安全分级结果表';
+```
+
+**免检（缓存命中）逻辑**:
+- 查询条件: `cache_key = {systemName}|{tableName}|{columnName}`
+- 命中后还需判定缓存是否**仍然有效**，满足以下任一条件则视为失效，走重新判定流程：
+  1. `expire_at` 不为空且已过期；
+  2. `rule_version` 与当前 ES 知识库版本不一致（知识库更新后旧结果应重算）；
+  3. 请求显式带 `forceRefresh=true`（强制重算，覆盖原记录）。
+- **null 结果的缓存策略**：未匹配（category=null）的记录也会落库。这类记录默认**不参与免检**（即下次请求仍会重试），避免"一次未命中永久不再尝试"；可通过配置 `cache-null-result` 切换该行为。
+- 命中且有效时，直接返回缓存结果，跳过后续流程。
+
+> **缓存刷新接口**（建议新增）：`POST /api/security/cache/refresh`，支持按 systemName / 全量 失效缓存，或在 ES 知识库重建后批量提升 `rule_version`。
+
+### 4.2 同义词替换规则表 (`dq_security_synonym_rule`)
+
+**用途**: 存储字段中文名的同义词映射关系
+
+```sql
+CREATE TABLE dq_security_synonym_rule (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+    system_name VARCHAR(100) COMMENT '系统名，NULL表示全局规则',
+    source_term VARCHAR(200) NOT NULL COMMENT '源词（如"自负金额"）',
+    target_term VARCHAR(200) NOT NULL COMMENT '目标词（如"免赔额"）',
+    match_type VARCHAR(20) DEFAULT 'EXACT' COMMENT '匹配方式：EXACT全等/CONTAINS包含/REGEX正则',
+    priority INT DEFAULT 0 COMMENT '优先级，数值越大越优先（用于多条规则同时命中时排序）',
+    is_active TINYINT DEFAULT 1 COMMENT '是否启用',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    INDEX idx_system_source (system_name, source_term)
+) COMMENT '安全分级同义词替换规则表';
+```
+
+**替换逻辑**:
+- 查询条件: `system_name IN ({systemName}, NULL)` AND `is_active = 1`，再按 `match_type` 进行匹配：
+  - `EXACT`：`source_term = {columnChnName}` 全等匹配；
+  - `CONTAINS`：`{columnChnName}` 包含 `source_term`（解决"投保人自负金额(元)"含前后缀无法全等命中的问题），命中后替换其中的子串或整体替换为 target_term；
+  - `REGEX`：按正则匹配（处理复杂模式，如去除单位/编号后缀）。
+- 优先级规则：系统级规则 > 全局规则；同级别按 `priority` 降序，再按 `match_type`（EXACT > CONTAINS > REGEX）择优取一条。
+- **替换 vs 扩展**：默认单向替换，只用 target_term 去检索 ES。若担心替换丢失原始语义，可改为"扩展查询"模式——原词与同义词一起作为多路检索的查询词（通过配置 `synonym-mode: replace|expand` 切换）。
+
+### 4.3 DDL文件位置
+- `data-check/sensitive-field-detection/src/main/resources/db/security-classification-ddl.sql`
+
+---
+
+## 5. Elasticsearch配置
+
+### 5.1 连接信息
+
+```yaml
+elasticsearch:
+  host: ${ES_HOST}
+  username: ${ES_USERNAME}
+  password: ${ES_PASSWORD}
+```
+
+**说明**: ES连接信息通过环境变量配置，不在代码中硬编码。
+
+### 5.2 索引结构
+
+**索引名**: `safe_all_topic`
+
+**字段说明**:
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| topic | keyword | 主题（如"业务"） |
+| asset | text | 资产项名称（如"商行投标利率详情"），用于BM25检索 |
+| category | keyword | 数据分类层级（如"业务\|金融监管和服务\|国库业务信息\|商行投标利率详情"） |
+| asset_embedding | dense_vector (1024维) | 资产项向量，用于向量相似度检索 |
+| category_embedding | dense_vector (1024维) | 分类向量（暂不使用） |
+
+### 5.3 检索策略
+
+#### 5.3.1 向量检索 (Vector Search)
+- **输入**: `columnChnName` 的 embedding (1024维)
+- **匹配字段**: `asset_embedding`
+- **相似度算法**: cosine similarity
+- **返回数量**: Top 10
+- **候选数量**: `num_candidates = 100`（HNSW 召回候选数，建议为 k 的 5~10 倍，越大召回越准但越慢）
+
+**关于相似度分数与阈值（重要）**:
+- ES 对 cosine 的 `_score` 计算公式为 `(1 + cosine_similarity) / 2`，归一化到 `[0, 1]`。
+- 因此阈值应基于**归一化后的 _score**。建议起步阈值 `min_score = 0.65`（约对应 cosine ≈ 0.3），后续根据实际召回效果调优。
+- 阈值通过 ES 的顶层 `min_score` 参数实现，**不能**写在 `knn.filter` 内：`knn.filter` 是预过滤（限定参与检索的文档子集），在过滤阶段 `_score` 尚未产生，对 `_score` 做 range 过滤无效。若需按字段（如 topic/system）限定范围，才放入 `knn.filter`。
+
+- **ES查询示例**（query_vector 为 1024 个浮点数）:
+```json
+{
+  "knn": {
+    "field": "asset_embedding",
+    "query_vector": [0.0123, -0.0456, "...(共1024维)...", 0.0789],
+    "k": 10,
+    "num_candidates": 100
+  },
+  "min_score": 0.65
+}
+```
+
+#### 5.3.2 BM25检索 (Keyword Search)
+- **输入**: `columnChnName` (原始文本)
+- **匹配字段**: `asset`
+- **返回数量**: Top 10
+- **ES查询示例**:
+```json
+{
+  "query": {
+    "match": {
+      "asset": {
+        "query": "自负金额",
+        "operator": "and"
+      }
+    }
+  },
+  "size": 10
+}
+```
+
+#### 5.3.3 合并去重
+- 将两路召回的结果按 `category` 字段去重
+- 保留每路的 score 信息，供AI参考
+- 输出格式:
+```json
+[
+  {
+    "category": "业务|金融监管和服务|国库业务信息|商行投标利率详情",
+    "asset": "商行投标利率详情",
+    "vector_score": 0.85,
+    "bm25_score": 0.72,
+    "source": ["vector", "bm25"]  // 标记来源
+  },
+  ...
+]
+```
+
+---
+
+## 6. Embedding服务
+
+### 6.1 模型配置
+- **模型名**: `text-embedding-v4`
+- **维度**: 1024
+- **调用方式**: 通过现有的 `LlmHttpClient` 或新增专用的 Embedding API
+
+### 6.2 服务接口设计
+
+```java
+public interface EmbeddingService {
+    /**
+     * 生成文本的embedding向量
+     * @param text 输入文本
+     * @return 1024维向量数组
+     */
+    float[] embed(String text);
+}
+```
+
+**实现建议**:
+- 复用现有的模型配置框架 (`ModelsProperties`)
+- 新增一个 embedding 专用的模型配置项
+- API Key 通过环境变量 `${DASHSCOPE_API_KEY}` 配置
+
+### 6.3 Embedding 缓存（性能优化）
+- **动机**: 数据字典中大量字段中文名重复或高度相似，实时调用 embedding API 成本高、延迟大。
+- **方案**: 在 `embed()` 上层增加缓存，key = `text 的归一化 + hash`（如 SHA-256），value = float[1024]。
+  - 一级缓存：本地 Caffeine（进程内，高频命中）；
+  - 二级缓存（可选）：Redis 或 DB 表 `dq_security_embedding_cache(text_hash, text, embedding JSON, model, created_at)`，跨实例共享。
+- **失效**: 缓存 key 应包含 `model` 名（如 `text-embedding-v4`），换模型时自动失效。
+- **批量**: 若 embedding API 支持批量入参，VectorSearch 前可批量生成，减少 HTTP 往返。
+
+---
+
+## 7. AI Prompt设计
+
+### 7.1 Prompt模板位置
+`data-check/sensitive-field-detection/src/main/resources/prompts/security-classification.txt`
+
+### 7.2 Prompt内容
+
+```
+你是一个数据安全分类分级专家。请根据以下字段信息和召回的关键项目录候选列表，判定该字段的数据分类。
+
+【字段信息】
+- 系统名称: {{systemName}}
+- 系统描述: {{systemDesc}}
+- 表名: {{tableName}}
+- 表中文名: {{tableChnName}}
+- 字段名: {{columnName}}
+- 字段中文名: {{columnChnName}}
+
+【召回的关键项目录候选列表】
+{{candidateList}}
+
+候选列表格式说明：
+- category: 数据分类层级字符串
+- asset: 关键项目录名称
+- vector_score: 向量相似度得分（0~1）
+- bm25_score: BM25相关性得分
+- source: 召回来源（"vector"/"bm25"/"both"）
+
+【任务】
+从候选列表中选择最匹配的一个category作为该字段的数据分类。如果所有候选都不匹配，请返回 matched_catalog=null。
+
+【输出格式】
+请严格以JSON格式返回，不要包含其他文字：
+{
+  "category": "选定的category字符串 或 null",
+  "matched_catalog": "命中的关键项目录asset名称 或 null",
+  "reason": "判定理由（50字以内）"
+}
+
+【判定规则】
+1. category必须从候选列表中选取，不能自行创造
+2. matched_catalog对应候选列表中的asset字段
+3. 如果候选列表为空，返回 category=null, matched_catalog=null
+4. 候选列表中的 vector_score 已是 ES 归一化后的分数（>= 召回阈值 0.65 才会进入候选）。若所有候选与字段语义明显不符（仅靠分数无法确定时，结合字段中文名/表名语义综合判断），返回 category=null, matched_catalog=null
+5. 优先选择同时被两路召回的候选（source="both"）
+6. 如果多个候选相似度接近，选择category层级更具体的那个
+
+【示例】
+输入候选列表：
+[
+  {"category": "业务|金融监管|商行投标", "asset": "商行投标利率", "vector_score": 0.85, "bm25_score": 0.72, "source": "both"},
+  {"category": "个人信息|身份信息", "asset": "身份证号", "vector_score": 0.3, "bm25_score": 0.1, "source": "vector"}
+]
+
+输出：
+{
+  "category": "业务|金融监管|商行投标",
+  "matched_catalog": "商行投标利率",
+  "reason": "向量相似度0.85且BM25得分0.72，两路均召回，匹配度最高"
+}
+```
+
+### 7.3 AI输出解析
+- 使用 Jackson 或 Gson 解析 JSON
+- 如果解析失败或返回格式不符合预期，按 `max-retries` 重试；最终仍失败则记录为 `category=null`（未匹配）并记录原始返回与错误日志
+
+---
+
+## 8. 工作流详细设计
+
+### 8.1 工作流配置类
+
+```java
+@Configuration
+public class SecurityClassificationGraphConfig {
+    
+    @Bean
+    public CompiledGraph securityClassificationGraph(
+            ExemptionCheckNode exemptionCheckNode,
+            SynonymReplaceNode synonymReplaceNode,
+            VectorSearchNode vectorSearchNode,
+            Bm25SearchNode bm25SearchNode,
+            MergeDedupNode mergeDedupNode,
+            AiMatchNode aiMatchNode,
+            ResultSaveNode resultSaveNode) {
+        
+        return StateGraph.builder(SecurityClassificationState.class)
+                .addNode("exemptionCheck", exemptionCheckNode)
+                .addNode("synonymReplace", synonymReplaceNode)
+                .addNode("vectorSearch", vectorSearchNode)
+                .addNode("bm25Search", bm25SearchNode)
+                .addNode("mergeDedup", mergeDedupNode)
+                .addNode("aiMatch", aiMatchNode)
+                .addNode("resultSave", resultSaveNode)
+                
+                // 定义边
+                .addEdge(StateGraph.START, "exemptionCheck")
+                .addConditionalEdges("exemptionCheck", 
+                    state -> state.getIsExempt() ? "resultSave" : "synonymReplace")
+                .addEdge("synonymReplace", "parallelSearch")
+                
+                // 并行执行向量检索和BM25检索
+                .addParallelEdge("parallelSearch", List.of("vectorSearch", "bm25Search"))
+                
+                .addEdge("vectorSearch", "mergeDedup")
+                .addEdge("bm25Search", "mergeDedup")
+                .addEdge("mergeDedup", "aiMatch")
+                .addEdge("aiMatch", "resultSave")
+                .addEdge("resultSave", StateGraph.END)
+                
+                .compile();
+    }
+}
+```
+
+> **并行节点状态合并（重要）**：`vectorSearch` 与 `bm25Search` 并行执行并分别写入 `vectorResults` / `bm25Results`。在 Spring AI Alibaba Graph 中，并行分支对 State 的写入需要通过 `KeyStrategyFactory` 为每个 key 定义合并策略（reducer），否则并发写同一 key 会相互覆盖。
+> - 由于两路写入的是**不同的 key**（`vectorResults`、`bm25Results`），各自用 `ReplaceStrategy` 即可，互不冲突。
+> - `mergeDedup` 是两路的汇聚（fan-in）节点，需等待两个并行分支都完成后再执行（框架的 barrier 机制），实现时确认两条入边都已配置。
+> - 注意：Spring AI Alibaba 的 State 通常基于 `OverAllState` + `KeyStrategyFactory`（Map 语义），而非下方 8.2 的纯 POJO。8.2 的 `@Data` 类仅用于表达字段含义，实际落地请以框架的 `OverAllState` API 为准。
+
+### 8.2 状态对象设计
+
+```java
+@Data
+public class SecurityClassificationState {
+    // 输入
+    private String systemName;
+    private String systemDesc;
+    private String tableName;
+    private String tableChnName;
+    private String columnName;
+    private String columnChnName;
+    
+    // 中间状态
+    private String replacedColumnChnName;  // 同义词替换后的字段中文名
+    private boolean isExempt;              // 是否免检
+    private List<SearchResult> vectorResults;  // 向量检索结果
+    private List<SearchResult> bm25Results;    // BM25检索结果
+    private List<CandidateItem> candidateList; // 合并去重后的候选列表
+    
+    // 输出
+    private String category;
+    private String matchedCatalog;
+    private String reason;
+    private CachedResult cachedResult;  // 缓存结果（免检时返回）
+}
+```
+
+**说明**: 具体实现参考现有质检流程的 `FieldResult` 状态对象设计模式。
+
+### 8.3 节点详细设计
+
+#### 8.3.1 ExemptionCheckNode (免检判定)
+**职责**: 查询结果表缓存，判断是否免检
+
+**逻辑**:
+1. 生成 cacheKey = `{systemName}|{tableName}|{columnName}`
+2. 查询 `dq_security_classification_result` 表
+3. 命中后校验缓存有效性（未过期 + rule_version 一致 + 非未参与免检的 null 结果 + 非 forceRefresh），有效则标记 `isExempt=true` 返回缓存结果
+4. 缓存失效或未命中则继续后续流程
+
+**参考实现**: 类似现有质检流程的 `CacheLoadNode`
+
+---
+
+#### 8.3.2 SynonymReplaceNode (同义词替换)
+**职责**: 根据同义词规则表替换字段中文名
+
+**逻辑**:
+1. 查询 `dq_security_synonym_rule` 表（`system_name IN ({systemName}, NULL)` AND `is_active = 1`）
+2. 按 `match_type`（EXACT/CONTAINS/REGEX）匹配 `columnChnName`
+3. 优先级：系统级 > 全局；同级按 `priority` 降序、match_type 优先级择优取一条
+4. 按 `synonym-mode` 配置：replace（用 target_term 替换检索）或 expand（原词+同义词一起检索）
+5. 未命中任何规则时，直接使用原始 `columnChnName`
+
+---
+
+#### 8.3.3 VectorSearchNode (向量检索)
+**职责**: 调用Embedding服务生成向量，执行ES向量相似度检索
+
+**逻辑**:
+1. 对 `replacedColumnChnName` 调用 `EmbeddingService.embed()` 生成1024维向量（命中 embedding 缓存则复用）
+2. 调用 `ElasticsearchService.vectorSearch()` 执行KNN检索
+3. 参数: topK=10, numCandidates=100, minScore=0.65（顶层 min_score，非 knn.filter）
+4. 返回 Top 10 检索结果；Embedding 失败时降级为仅 BM25（见 11.2）
+
+---
+
+#### 8.3.4 Bm25SearchNode (BM25检索)
+**职责**: 执行ES BM25关键词检索
+
+**逻辑**:
+1. 使用 `replacedColumnChnName` 作为查询词
+2. 调用 `ElasticsearchService.bm25Search()` 执行match查询
+3. 参数: topK=10
+4. 返回 Top 10 检索结果
+
+---
+
+#### 8.3.5 MergeDedupNode (合并去重)
+**职责**: 合并两路召回结果，按category去重
+
+**逻辑**:
+1. 接收 `vectorResults` 和 `bm25Results`
+2. 按 `category` 字段去重，合并到同一个Map
+3. 保留每路的score信息和来源标记（"vector"/"bm25"/"both"）
+4. 输出候选列表 `candidateList`
+
+---
+
+#### 8.3.6 AiMatchNode (AI判定)
+**职责**: 调用LLM进行最终分类判定
+
+**逻辑**:
+1. 读取 Prompt 模板文件 `resources/prompts/security-classification.txt`
+2. 填充变量: `systemName`, `systemDesc`, `tableName`, `tableChnName`, `columnName`, `columnChnName`, `candidateList`
+3. 调用 `LlmHttpClient` 发送请求
+4. 解析JSON响应，提取 `category`, `matched_catalog`, `reason`
+5. 如果解析失败，按 max-retries 重试，最终失败记录 category=null
+
+---
+
+#### 8.3.7 ResultSaveNode (保存结果)
+**职责**: 将分级结果保存到数据库
+
+**逻辑**:
+1. 构建 `SecurityClassificationResult` 对象
+2. 设置 `cache_key`, `category`, `matched_catalog`, `is_exempt`, `ai_reason` 等字段
+3. 写入当前 `rule_version`，按配置设置 `expire_at`
+4. 执行 UPSERT 操作（INSERT ON DUPLICATE KEY UPDATE）
+5. 返回最终结果
+
+**参考实现**: 类似现有质检流程的 `CacheSaveNode`
+
+---
+
+## 9. 配置项汇总
+
+### 9.1 application.yml 新增配置
+
+```yaml
+# Elasticsearch配置
+elasticsearch:
+  host: ${ES_HOST}           # 从环境变量读取
+  username: ${ES_USERNAME}   # 从环境变量读取
+  password: ${ES_PASSWORD}   # 从环境变量读取
+  index: safe_all_topic
+
+# Embedding模型配置
+embedding:
+  model: text-embedding-v4
+  dimension: 1024
+  api-key: ${DASHSCOPE_API_KEY}  # 从环境变量读取
+  cache:
+    enabled: true                # 是否启用embedding缓存
+    max-size: 10000              # 本地缓存最大条数
+    ttl-hours: 168               # 缓存过期时间（小时）
+
+# 安全分级配置
+security-classification:
+  vector-search:
+    top-k: 10
+    num-candidates: 100          # HNSW候选数
+    min-score: 0.65              # ES归一化后的相似度阈值
+  bm25-search:
+    top-k: 10
+  cache:
+    cache-null-result: false     # 是否缓存未匹配(null)结果用于免检
+    rule-version: v1             # 当前知识库版本，更新后递增使旧缓存失效
+  synonym-mode: replace          # replace替换 / expand扩展查询
+  max-retries: 3
+  llm-concurrency-limit: 5       # 批量时LLM最大并发
+  batch-size-limit: 500          # 单批最大条数
+  latch-timeout-minutes: 5
+```
+
+**说明**: 所有敏感信息（API Key、密码等）均通过环境变量配置，不在代码或配置文件中硬编码。
+
+### 9.2 依赖新增
+
+```xml
+<!-- Elasticsearch Java Client -->
+<dependency>
+    <groupId>co.elastic.clients</groupId>
+    <artifactId>elasticsearch-java</artifactId>
+    <version>8.11.0</version>
+</dependency>
+
+<!-- Jackson for JSON parsing -->
+<dependency>
+    <groupId>com.fasterxml.jackson.core</groupId>
+    <artifactId>jackson-databind</artifactId>
+</dependency>
+```
+
+---
+
+## 10. 实施计划
+
+### 阶段1: 基础框架搭建
+1. 创建数据库表（DDL）
+2. 配置Elasticsearch连接
+3. 实现EmbeddingService
+4. 实现ElasticsearchService（向量检索 + BM25检索）
+
+### 阶段2: Repository层实现
+1. SecurityClassificationResultRepository
+2. SecuritySynonymRepository
+
+### 阶段3: 工作流节点实现
+1. ExemptionCheckNode
+2. SynonymReplaceNode
+3. VectorSearchNode
+4. Bm25SearchNode
+5. MergeDedupNode
+6. AiMatchNode
+7. ResultSaveNode
+
+### 阶段4: 工作流编排
+1. SecurityClassificationGraphConfig
+2. SecurityClassificationWorkflow
+
+### 阶段5: Controller和DTO
+1. SecurityClassificationController
+2. SecurityClassificationInputDTO
+3. SecurityClassificationOutputVO
+
+### 阶段6: 测试和优化
+1. 单元测试
+2. 集成测试
+3. 性能优化（并发、缓存）
+
+### 阶段7: 后续扩展（可选）
+1. 未匹配/低质量结果的校正机制（方式待定）
+2. 通用规则知识库 + 补充规则知识库的多路召回
+3. 批量处理接口
+
+---
+
+## 11. 注意事项
+
+### 11.1 性能考虑
+- **并发控制**: 使用 `llm-concurrency-limit` 限制LLM并发调用数
+- **缓存策略**: 充分利用结果表缓存，避免重复计算
+- **超时处理**: 设置合理的 latch-timeout，防止线程阻塞
+
+### 11.2 异常处理与降级
+> 注意：向量检索与 BM25 检索**都依赖同一个 ES**，ES 整体不可用时两路同时失效，不能"互相降级"。降级策略需按失败点区分：
+
+| 失败点 | 降级策略 |
+|--------|----------|
+| Embedding 服务失败 | 向量检索不可用，**降级为仅 BM25 检索**；BM25 也无候选则返回 `category=null` |
+| ES 整体不可用 | 两路召回均失效，候选列表为空。直接返回 `category=null`，不调用 LLM（无候选时 LLM 无意义）；可触发告警 |
+| 仅向量检索失败（ES 部分异常） | 降级为仅 BM25 |
+| 仅 BM25 失败 | 降级为仅向量 |
+| LLM 调用失败 | 按 `max-retries` 重试（指数退避）；最终失败返回 `category=null`，保留候选列表 |
+| LLM 返回非法 JSON | 解析失败重试，最终失败返回 `category=null`（见 7.3） |
+
+- 所有降级路径都应落库（`category=null`）并记录降级原因，便于事后补算。
+
+### 11.3 幂等性
+- 单条接口以 `cache_key`（systemName|tableName|columnName）为幂等键，重复请求命中有效缓存直接返回，结果一致。
+- `forceRefresh=true` 时覆盖更新（UPSERT），仍保持幂等（同输入得同结果）。
+- 批量接口对每条独立做幂等判断。
+
+### 11.4 数据安全
+- **敏感信息脱敏**: 日志中不打印完整的字段中文名
+- **API密钥管理**: 使用环境变量管理ES和LLM的API密钥，禁止硬编码
+- **访问控制**: 接口增加权限校验（后续实现）
+- **配置安全**: 所有敏感配置（密码、API Key）通过环境变量或配置中心注入
+
+### 11.5 可观测性与监控
+建议接入指标（Micrometer/Prometheus）和结构化日志，重点关注：
+- **质量指标**: AI 判定 null 率（未匹配占比）、各 category 的分布。
+- **召回指标**: 向量/BM25 各自命中率、两路重合率、平均候选数、阈值过滤掉的比例。
+- **性能指标**: 单条/批量 P95 延迟、各节点耗时分布、embedding 缓存命中率、LLM 调用耗时与并发饱和度。
+- **成本指标**: LLM token 消耗、embedding API 调用次数（缓存前/后对比）。
+- **稳定性**: ES/LLM/Embedding 各依赖的失败率与降级触发次数（触发降级应告警）。
+
+---
+
+## 13. 召回优化方案（待实施）
+
+> 背景：在少部分场景下，判别信息不在 `columnChnName` 而在英文名 `columnName`（常为缩写，如 `TBD_INT_RT`）或表名 `tableChnName` 中。仅用字段中文名召回时，正确候选无法进入 top-K，导致后续 AI 无论如何都选不出正确结果（缺失的候选无法被选中）。
+>
+> 关键认知：这是**召回质量**问题，不是**判定质量**问题。应优先在召回侧发力，而非在判定侧叠加 AI 自检。落地前建议先用第 14 节的评测脚本量化 recall@K，用真实数据决定投入方向。
+
+### 13.1 方案A：多字段召回 + Query 改写（优先，改动小）
+
+不改变"召回 → 判定"骨架，只把召回输入做厚。三个可叠加的子手段：
+
+1. **多字段拼接（零成本）**：
+   - 向量 embedding 文本由 `表:{tableChnName} 字段:{columnChnName} 英文:{columnName} 系统:{systemDesc}` 组合而成；
+   - BM25 对 `columnChnName / tableChnName / columnName` 拆词做 `should`(OR) 查询。
+2. **多路 Query + RRF 融合**：分别用「字段中文名」「表名+字段名」「英文名展开」发多个查询，各自取 top-K，再用 RRF 按排名融合（`score(d)=Σ 1/(k+rank_q(d))`，k≈60），天然解决 BM25 与向量分数不可比的问题。
+3. **Query 改写（一次廉价 LLM 调用，可缓存）**：把零散字段归一为规范检索词，尤其处理英文缩写展开。例：`投标利率 / TBD_INT_RT / 国库业务表` → `国库 商行投标利率`。
+
+**接入位置**：在 `SynonymReplaceNode` 后、检索前新增 `QueryRewriteNode`，并将检索节点改造为多 query 输入、`MergeDedupNode` 升级为 RRF 融合。
+
+### 13.2 方案B：Agentic 检索循环（方案A 的闭环升级）
+
+将「召回 + 判定」合并为一个带工具的 ReAct Agent，能根据召回结果质量自我修正、换策略重检索：
+
+- **工具**：`search(query, mode, topK)` 封装现有 ES 向量/BM25 检索。
+- **循环（Reason-Act-Observe）**：用字段中文名检索 → 评估候选质量 → 不理想则换 query（表名 / 英文名展开 / 同义词）重检索 → 满意即输出 category，达到 `max_iterations`(如3) 仍不行则 `category=null`。
+- **护栏**：最大轮次、预置"重检索剧本"避免漫无目的、用 reranker 分数作为"够不够好"的客观停止判据。
+- **接入位置**：替换 `VectorSearch / Bm25Search / MergeDedup / AiMatch` 四节点为单个 `AgenticRetrievalNode`，免检/同义词/结果保存不变。
+
+> 说明：方案B 中"换 query 重检索"的每一步即复用方案A 的技巧；方案A 是开环（猜一次），方案B 是闭环（不行就重试）。这也是"让 AI 自检"的正确形态——**对检索结果自检**，而非对凭空判定自检。
+
+### 13.3 配套建议
+- 引入 **reranker（cross-encoder，如 bge-reranker）** 对候选统一重排，给出可校准的相关性分；既是方案B 的停止判据，也能提升方案A 的最终选择质量（比 LLM 自报 confidence 可信）。
+- **演进路径**：先上方案A（便宜、改动小）→ 用评测看 recall@K 提升 → 仍有难字段则升级为方案B。
+
+---
+
+## 14. 召回评测脚本（recall-eval）
+
+> 目的：在功能完整落地前，用标注数据**独立量化**召回与判定质量，决定优化方向。脚本与 Spring 实现解耦，单独可跑。
+
+- **位置**：`data-check/sensitive-field-detection/eval/`
+- **核心指标**：
+  - `recall@K`：正确 category 是否出现在融合后 top-K（衡量召回瓶颈）；
+  - 各通道单独 recall（向量 / BM25）、MRR；
+  - 判定准确率：在"召回命中"子集上 AI 选对的比例（衡量判定瓶颈）；
+  - 端到端准确率。
+- **策略对比**：内置 `baseline`（仅字段中文名）/ `multifield`（多字段拼接）/ `rewrite`（Query 改写）三种召回策略横向对比，直接验证方案A 的收益。
+- **运行方式与依赖**：见 `eval/README.md`。
+
+---
+
+## 12. 附录
+
+### 12.1 术语表
+| 术语 | 说明 |
+|------|------|
+| 关键项目录 | ES索引 `safe_all_topic` 中存储的数据分类目录 |
+| 多路召回 | 同时使用向量检索和BM25检索两种策略 |
+| 免检 | 命中且有效的缓存，跳过AI判定流程 |
+| 同义词替换 | 将字段中文名替换为标准术语（如"自负金额"→"免赔额"） |
+
+### 12.3 核心概念映射关系
+为避免 `asset`、`category`、"数据分类"、"关键项目录"混淆，统一对应关系如下：
+
+| 文档术语 | ES 字段 | 含义 | 示例 |
+|----------|---------|------|------|
+| 关键项目录名称 / matched_catalog | `asset` (text) | 最细粒度的资产项名称，用于 BM25 检索 | `商行投标利率详情` |
+| 数据分类 / category | `category` (keyword) | 从顶层到该资产项的完整分类层级（`|` 分隔） | `业务\|金融监管和服务\|国库业务信息\|商行投标利率详情` |
+| 主题 / topic | `topic` (keyword) | category 的最顶层 | `业务` |
+
+- 一个 `asset` 唯一对应一个 `category`；`category` 的最后一段通常即为 `asset`。
+- AI 从候选中选出 `asset`（matched_catalog），其完整 `category` 作为最终数据分类返回。
+
+### 12.2 参考文档
+- Spring AI Alibaba Graph 官方文档
+- Elasticsearch Java Client 文档
+- 现有质检流程代码: `ai-tools/data-quality-check/src/main/java/com/example/qualitycheck/workflow/`

@@ -40,3 +40,49 @@ ambiguity:
       username: root
       password: your-password
       driver-class-name: com.mysql.cj.jdbc.Driver
+
+# ============================================================
+# 安全分类分级（对应设计文档）。
+# 应用启动不依赖 ES/DB；仅当调用 /api/security/classify 时才访问 ES 与 LLM。
+# 敏感信息（ES 密码、API Key）建议用环境变量注入。
+# ============================================================
+elasticsearch:
+  host: ${ES_HOST:http://127.0.0.1:9200}
+  username: ${ES_USERNAME:}
+  password: ${ES_PASSWORD:}
+  index: safe_all_topic
+
+embedding:
+  base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api-key: ${DASHSCOPE_API_KEY:}
+  model: text-embedding-v4
+  dimension: 1024
+  cache:
+    enabled: true
+    max-size: 10000
+
+security-classification:
+  vector-search:
+    top-k: 10
+    num-candidates: 100
+    min-score: 0.65
+  bm25-search:
+    top-k: 10
+  cache:
+    cache-null-result: false
+    rule-version: v1
+    ttl-hours: 0
+  synonym:
+    mode: replace          # replace 替换 / expand 扩展查询
+  max-retries: 3
+  llm-concurrency-limit: 5
+  batch-size-limit: 500
+  latch-timeout-minutes: 5
+  # 结果缓存表 + 同义词规则表的数据库；enabled=false 时不读写库、不需数据源。
+  db:
+    enabled: false
+    datasource:
+      url: jdbc:mysql://localhost:3306/datacheck?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+      username: root
+      password: your-password
+      driver-class-name: com.mysql.cj.jdbc.Driver

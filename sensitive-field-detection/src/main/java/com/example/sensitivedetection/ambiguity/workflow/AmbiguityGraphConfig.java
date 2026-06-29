@@ -1,9 +1,10 @@
 package com.example.sensitivedetection.ambiguity.workflow;
 
 import com.alibaba.cloud.ai.graph.CompiledGraph;
-import com.alibaba.cloud.ai.graph.GraphStateException;
-import com.alibaba.cloud.ai.graph.OverAllState;
+import com.alibaba.cloud.ai.graph.KeyStrategy;
+import com.alibaba.cloud.ai.graph.KeyStrategyFactory;
 import com.alibaba.cloud.ai.graph.StateGraph;
+import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import com.example.sensitivedetection.ambiguity.workflow.node.AmbiguitySummarizeNode;
 import com.example.sensitivedetection.ambiguity.workflow.node.CacheLoadNode;
@@ -25,7 +26,7 @@ import static com.alibaba.cloud.ai.graph.action.AsyncNodeAction.node_async;
 public class AmbiguityGraphConfig {
 
     @Bean
-    public CompiledGraph<OverAllState> ambiguityGraph(
+    public CompiledGraph ambiguityGraph(
             CacheLoadNode cacheLoadNode,
             GateNode gateNode,
             Stage1Node stage1Node,
@@ -34,12 +35,12 @@ public class AmbiguityGraphConfig {
             CacheSaveNode cacheSaveNode,
             AmbiguitySummarizeNode ambiguitySummarizeNode) throws GraphStateException {
 
-        Map<String, Object> stateSchema = Map.of(
+        KeyStrategyFactory keyStrategyFactory = () -> Map.<String, KeyStrategy>of(
                 "results", new ReplaceStrategy(),
                 "batchNo", new ReplaceStrategy()
         );
 
-        StateGraph<OverAllState> graph = new StateGraph<>(stateSchema, OverAllState::new)
+        StateGraph graph = new StateGraph(keyStrategyFactory)
                 .addNode("cacheLoad", node_async(cacheLoadNode))
                 .addNode("gate", node_async(gateNode))
                 .addNode("stage1", node_async(stage1Node))

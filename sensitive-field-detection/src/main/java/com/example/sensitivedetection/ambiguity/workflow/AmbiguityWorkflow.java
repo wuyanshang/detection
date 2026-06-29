@@ -21,9 +21,9 @@ import java.util.stream.Collectors;
 @Component
 public class AmbiguityWorkflow {
 
-    private final CompiledGraph<OverAllState> ambiguityGraph;
+    private final CompiledGraph ambiguityGraph;
 
-    public AmbiguityWorkflow(@Qualifier("ambiguityGraph") CompiledGraph<OverAllState> ambiguityGraph) {
+    public AmbiguityWorkflow(@Qualifier("ambiguityGraph") CompiledGraph ambiguityGraph) {
         this.ambiguityGraph = ambiguityGraph;
     }
 
