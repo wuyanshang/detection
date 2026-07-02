@@ -86,3 +86,23 @@ security-classification:
       username: root
       password: your-password
       driver-class-name: com.mysql.cj.jdbc.Driver
+
+# ============================================================
+# classify-v2（新增，独立于上面的 security-classification）。
+# 接口：/api/security/v2/classify-table、/api/security/v2/classify-field。
+# 指向新索引 safe_all_topic_v2（含 content/example/定义），复用 elasticsearch.* 连接信息。
+# ============================================================
+classify-v2:
+  index: safe_all_topic_v2
+  table-infer-enabled: true      # 表级含义推断（锁定主体）
+  subject-consistency: true      # 判定时主体一致性约束
+  vector-search:
+    top-k: 25
+    num-candidates: 300
+    min-score: 0.5
+  bm25-search:
+    top-k: 25
+  max-retries: 3
+  concurrency-limit: 5
+  columns-limit: 500
+  latch-timeout-minutes: 5
