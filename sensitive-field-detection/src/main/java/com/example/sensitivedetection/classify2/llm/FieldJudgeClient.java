@@ -74,6 +74,7 @@ public class FieldJudgeClient {
                 .replace("{{tableSubject}}", nz(ctx.getTableSubject()))
                 .replace("{{columnName}}", nz(ctx.getColumnName()))
                 .replace("{{columnChnName}}", nz(ctx.getColumnChnName()))
+                .replace("{{normalizedName}}", nz(ctx.getNormalizedName()))
                 .replace("{{fieldSubject}}", nz(ctx.getFieldSubject()))
                 .replace("{{subjectRule}}", subjectRule)
                 .replace("{{candidateList}}", buildCandidateList(ctx.getCandidates()));

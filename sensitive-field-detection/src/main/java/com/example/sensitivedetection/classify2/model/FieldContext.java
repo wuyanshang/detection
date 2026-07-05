@@ -35,6 +35,8 @@ public class FieldContext {
     private String category;        // null 表示未匹配
     private String matchedCatalog;  // 命中叶子名 asset
     private Integer securityLevel;  // 随命中目录带出
+    private String regulatoryLevel; // 监管级别，随命中目录带出
+    private String matchType;       // EXACT / FALLBACK / UNMATCHED
     private String subject;         // 最终判定主体
     private String reason;
     private String source;          // llm / no-candidate / degraded

@@ -23,5 +23,13 @@ public class FieldJudgeResponse {
     @JsonProperty("security_level")
     private Integer securityLevel;
 
+    /** 监管级别，如"其他一般数据" */
+    @JsonProperty("regulatory_level")
+    private String regulatoryLevel;
+
+    /** 匹配类型：EXACT（精确命中）/ FALLBACK（选最接近候选，待复核）/ UNMATCHED（无相关候选） */
+    @JsonProperty("match_type")
+    private String matchType;
+
     private String reason;
 }

@@ -21,6 +21,10 @@ public class FieldClassifyVO {
     private String matchedCatalog;
     /** 安全级别（随命中目录带出） */
     private Integer securityLevel;
+    /** 监管级别（随命中目录带出） */
+    private String regulatoryLevel;
+    /** 匹配类型：EXACT / FALLBACK（待复核）/ UNMATCHED */
+    private String matchType;
     /** 判定主体 */
     private String subject;
     private String reason;
@@ -37,6 +41,8 @@ public class FieldClassifyVO {
         vo.category = ctx.getCategory();
         vo.matchedCatalog = ctx.getMatchedCatalog();
         vo.securityLevel = ctx.getSecurityLevel();
+        vo.regulatoryLevel = ctx.getRegulatoryLevel();
+        vo.matchType = ctx.getMatchType();
         vo.subject = ctx.getSubject();
         vo.reason = ctx.getReason();
         vo.source = ctx.getSource();

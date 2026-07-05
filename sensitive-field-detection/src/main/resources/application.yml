@@ -99,7 +99,7 @@ classify-v2:
   vector-search:
     top-k: 25
     num-candidates: 300
-    min-score: 0.5
+    min-score: 0.0        # 评测期设 0：保证 FALLBACK 有候选可挑；标注集回调后再上调
   bm25-search:
     top-k: 25
   max-retries: 3

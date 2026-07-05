@@ -17,6 +17,7 @@ public class SearchHitV2 {
     private String content;          // 枚举示例原文
     private String level3Definition;
     private Integer securityLevel;
+    private String regulatoryLevel;  // 监管级别，如"其他一般数据"
     private double score;
     /** "vector" 或 "bm25" */
     private String source;

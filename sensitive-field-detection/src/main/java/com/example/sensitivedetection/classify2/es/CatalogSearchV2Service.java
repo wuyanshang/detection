@@ -81,7 +81,7 @@ public class CatalogSearchV2Service {
     }
 
     private List<String> sourceFields() {
-        return List.of("asset", "category", "content", "level3_definition", "security_level");
+        return List.of("asset", "category", "content", "level3_definition", "security_level", "regulatory_level");
     }
 
     private List<SearchHitV2> search(Map<String, Object> body, String source) {
@@ -107,12 +107,15 @@ public class CatalogSearchV2Service {
                 JsonNode src = hit.path("_source");
                 Integer sec = src.has("security_level") && !src.path("security_level").isNull()
                         ? src.path("security_level").asInt() : null;
+                String reg = src.has("regulatory_level") && !src.path("regulatory_level").isNull()
+                        ? src.path("regulatory_level").asText() : null;
                 out.add(new SearchHitV2(
                         src.path("category").asText(""),
                         src.path("asset").asText(""),
                         src.path("content").asText(""),
                         src.path("level3_definition").asText(""),
                         sec,
+                        reg,
                         hit.path("_score").asDouble(0.0),
                         source));
             }

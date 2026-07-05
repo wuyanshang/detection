@@ -57,6 +57,7 @@ public class MergeV2Node implements NodeAction {
         c.setContent(hit.getContent());
         c.setLevel3Definition(hit.getLevel3Definition());
         c.setSecurityLevel(hit.getSecurityLevel());
+        c.setRegulatoryLevel(hit.getRegulatoryLevel());
         return c;
     }
 

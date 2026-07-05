@@ -7,6 +7,7 @@
 - 整表主体: {{tableSubject}}
 - 字段名: {{columnName}}
 - 字段中文名: {{columnChnName}}
+- 规范化含义: {{normalizedName}}（表级推断结果，比原始中文名更可靠；原始中文名可能含英文码/误导，以此为准）
 - 字段推断主体: {{fieldSubject}}
 
 【候选目录列表】
@@ -18,17 +19,24 @@
 - content: 该目录枚举的示例项（最重要的判断依据，如"如个人姓名、性别、证件号码等"）
 - level3Definition: 三级定义（消歧上下文）
 - securityLevel: 该目录的安全级别
+- regulatoryLevel: 该目录的监管级别
 - vectorScore/bm25Score/source: 召回分数与来源
 
 【任务】
-从候选中选出最匹配的一个 category。都不匹配则 category=null。
+从候选中选出最匹配的一个 category，并给出匹配类型 match_type。category 必须来自候选，不得自造、不得拼接层级路径。
+
+【匹配类型 match_type（三选一）】
+- EXACT：字段语义**明确命中**某候选（命中其 content 枚举项，或叶子名/规范化含义高度吻合）。
+- FALLBACK：没有任何候选能明确命中，但候选里存在语义**相对最接近**的一个——选它，并标 FALLBACK（供人工复核）。级别仍取该候选的真实值，不得估算或改动。
+- UNMATCHED：候选里**没有任何一个**与字段语义相关 → category=null。
 
 【判定规则】
 1. category 必须来自候选，不得自造。
-2. **优先看 content 枚举示例**：字段语义命中某候选的枚举项即为强匹配（如字段"姓名"命中 content 里的"姓名"）。
+2. **优先看 content 枚举示例**：字段语义命中某候选的枚举项即为强匹配（如字段"姓名"命中 content 里的"姓名"）→ EXACT。
 3. {{subjectRule}}
 4. 结合 level3Definition 与完整路径消歧：同名叶子（如多个"姓名"）选路径主体与字段主体一致的。
-5. 都不符合语义则返回 null。
+5. 无明确命中时，不要直接判 null；先在候选里挑语义最接近的一个作为 FALLBACK。只有候选整体都不相关，才判 UNMATCHED / null。
+6. security_level 与 regulatory_level 必须原样取自选中候选，禁止自行编造或推算。
 
 【输出格式】严格 JSON，不要输出其它文字：
 {
@@ -36,5 +44,7 @@
   "matched_catalog": "命中的 asset 或 null",
   "subject": "命中主体 或 null",
   "security_level": 命中目录的安全级别数字 或 null,
-  "reason": "判定理由（50字内）"
+  "regulatory_level": "命中目录的监管级别 或 null",
+  "match_type": "EXACT / FALLBACK / UNMATCHED",
+  "reason": "判定理由（50字内），FALLBACK 时说明为何未精确命中"
 }
